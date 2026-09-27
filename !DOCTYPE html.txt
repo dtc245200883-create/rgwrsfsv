@@ -1,0 +1,149 @@
+-- ========================================================
+-- TẠO CƠ SỞ DỮ LIỆU VÀ CÁC BẢNG NGHỆP VỤ
+-- ========================================================
+CREATE DATABASE IF NOT EXISTS healthsync_db;
+USE healthsync_db;
+
+DROP TABLE IF EXISTS Prescriptions;
+DROP TABLE IF EXISTS Appointments;
+DROP TABLE IF EXISTS Patients;
+DROP TABLE IF EXISTS Doctors;
+
+-- Bảng Bệnh nhân
+CREATE TABLE Patients (
+    patient_id INT AUTO_INCREMENT PRIMARY KEY,
+    full_name VARCHAR(100) NOT NULL,
+    phone VARCHAR(15) NOT NULL
+);
+
+-- Bảng Bác sĩ
+CREATE TABLE Doctors (
+    doctor_id INT AUTO_INCREMENT PRIMARY KEY,
+    full_name VARCHAR(100) NOT NULL,
+    specialty VARCHAR(50)
+);
+
+-- Bảng Lịch hẹn
+CREATE TABLE Appointments (
+    appointment_id INT AUTO_INCREMENT PRIMARY KEY,
+    patient_id INT NOT NULL,
+    doctor_id INT NOT NULL,
+    appointment_date DATETIME NOT NULL,
+    status ENUM('PENDING', 'CONFIRMED', 'CHECKED_IN', 'COMPLETED', 'CANCELLED') DEFAULT 'PENDING',
+    deposit_amount DECIMAL(10, 2) DEFAULT 0.00,
+    penalty_fee DECIMAL(10, 2) DEFAULT 0.00,
+    cancel_reason VARCHAR(255) DEFAULT NULL,
+    FOREIGN KEY (patient_id) REFERENCES Patients(patient_id),
+    FOREIGN KEY (doctor_id) REFERENCES Doctors(doctor_id)
+);
+
+-- Bảng Đơn thuốc
+CREATE TABLE Prescriptions (
+    prescription_id INT AUTO_INCREMENT PRIMARY KEY,
+    appointment_id INT UNIQUE NOT NULL,
+    medication_details TEXT NOT NULL,
+    issued_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (appointment_id) REFERENCES Appointments(appointment_id) ON DELETE CASCADE
+);
+
+-- Trigger đảm bảo tính toàn vẹn: Chỉ cho kê đơn khi trạng thái là COMPLETED
+DELIMITER //
+CREATE TRIGGER chk_prescription_before_insert
+BEFORE INSERT ON Prescriptions
+FOR EACH ROW
+BEGIN
+    DECLARE app_status VARCHAR(20);
+    SELECT status INTO app_status FROM Appointments WHERE appointment_id = NEW.appointment_id;
+    IF app_status != 'COMPLETED' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Lỗi nghiệp vụ: Chỉ có thể kê đơn thuốc cho lịch hẹn đã hoàn thành (COMPLETED).';
+    END IF;
+END;
+//
+DELIMITER ;
+
+-- ========================================================
+-- CHẠY KỊCH BẢN MÔ PHỎNG DỮ LIỆU THỰC TẾ (DML)
+-- ========================================================
+
+-- Chèn dữ liệu ban đầu
+INSERT INTO Patients (full_name, phone) VALUES 
+('Nguyen Van A', '0901234567'),
+('Tran Thi B', '0912345678');
+
+INSERT INTO Doctors (full_name, specialty) VALUES 
+('BS. Le Van C', 'Noi khoa'),
+('BS. Pham Thi D', 'Nhi khoa');
+
+-- KỊCH BẢN 1: Đặt lịch -> Khám xong -> Kê đơn thuốc
+INSERT INTO Appointments (patient_id, doctor_id, appointment_date, status, deposit_amount) 
+VALUES (1, 1, '2026-10-01 09:00:00', 'PENDING', 500000.00);
+
+UPDATE Appointments SET status = 'CHECKED_IN' WHERE appointment_id = 1;
+UPDATE Appointments SET status = 'COMPLETED' WHERE appointment_id = 1;
+
+INSERT INTO Prescriptions (appointment_id, medication_details) 
+VALUES (1, 'Paracetamol 500mg x 10 vien, Amoxicillin 500mg x 14 vien');
+
+-- KỊCH BẢN 2: Bệnh nhân hủy lịch -> Phạt tiền cọc
+INSERT INTO Appointments (patient_id, doctor_id, appointment_date, status, deposit_amount) 
+VALUES (2, 2, '2026-10-02 14:00:00', 'PENDING', 300000.00);
+
+UPDATE Appointments SET status = 'CONFIRMED' WHERE appointment_id = 2;
+
+UPDATE Appointments 
+SET status = 'CANCELLED', 
+    cancel_reason = 'Ban viec dot xuat', 
+    penalty_fee = 150000.00 
+WHERE appointment_id = 2;
+
+-- ========================================================
+-- CÁC CÂU TRUY VẤN KIỂM TRA
+-- ========================================================
+-- Truy vấn 1: Danh sách khám thành công kèm đơn thuốc
+SELECT 
+    a.appointment_id,
+    p.full_name AS Patient_Name,
+    d.full_name AS Doctor_Name,
+    a.status,
+    pr.medication_details
+FROM Appointments a
+JOIN Patients p ON a.patient_id = p.patient_id
+JOIN Doctors d ON a.doctor_id = d.doctor_id
+JOIN Prescriptions pr ON a.appointment_id = pr.appointment_id
+WHERE a.status = 'COMPLETED';
+
+-- Truy vấn 2: Báo cáo tiền phạt lịch bị hủy
+SELECT 
+    a.appointment_id,
+    p.full_name AS Patient_Name,
+    a.deposit_amount,
+    a.penalty_fee,
+    (a.deposit_amount - a.penalty_fee) AS refund_amount,
+    a.cancel_reason
+FROM Appointments a
+JOIN Patients p ON a.patient_id = p.patient_id
+WHERE a.status = 'CANCELLED';
+# Nhật ký Tương tác AI (Prompt Log)
+
+### Prompt 1: Thẩm định thiết kế trạng thái
+- **User Prompt:** "Trong thiết kế cơ sở dữ liệu quan hệ, tại sao việc dùng một cột is_active (kiểu TINYINT/BOOLEAN) để theo dõi vòng đời của một Đơn hàng/Lịch hẹn lại là một thiết kế tồi (Anti-pattern)? Tôi nên thay thế bằng cấu trúc nào?"
+- **AI Response Summary:** Trải qua nhiều trạng thái chuyển tiếp, Boolean chỉ đại diện được 2 trạng thái Đúng/Sai nên làm mất dấu lịch sử. Nên thay thế bằng kiểu ENUM hoặc VARCHAR có Validation.
+
+### Prompt 2: Chọn kiểu dữ liệu tài chính
+- **User Prompt:** "Khi thiết kế cột deposit_amount và penalty_fee trong MySQL phục vụ tính toán tài chính, tôi nên dùng kiểu dữ liệu FLOAT, DOUBLE hay DECIMAL? Tại sao?"
+- **AI Response Summary:** Nên dùng `DECIMAL` vì FLOAT/DOUBLE gây ra sai số làm tròn (Float precision error), làm lệch số liệu đối soát doanh thu.
+
+### Prompt 3: Bảo vệ toàn vẹn dữ liệu
+- **User Prompt:** "Làm sao để chặn ở tầng Database không cho phép chèn Đơn thuốc vào bảng Prescriptions nếu Lịch hẹn chưa COMPLETED?"
+- **AI Response Summary:** Sử dụng `BEFORE INSERT TRIGGER` trên bảng `Prescriptions` để kiểm tra trạng thái lịch hẹn, phát câu lệnh `SIGNAL SQLSTATE` dừng thao tác nếu vi phạm.
+# Báo cáo Chẩn đoán Dữ liệu (Gap Analysis) - Hệ thống HealthSync
+
+Bản thiết kế cơ sở dữ liệu cũ (Legacy Schema) tồn tại 3 điểm "vênh" nghiêm trọng so với quy trình nghiệp vụ (Activity Diagram) do BA cung cấp:
+
+1. **Sai lầm về quản lý vòng đời (Lifecycle State):** Cột `is_active BOOLEAN` chỉ biểu diễn được 2 trạng thái (Đúng/Sai). Trong khi đó, quy trình nghiệp vụ yêu cầu theo dõi 5 trạng thái chuyển tiếp: `PENDING` -> `CONFIRMED` -> `CHECKED_IN` -> `COMPLETED` / `CANCELLED`.
+2. **Thất thoát dữ liệu tài chính & lý do hủy:** Cấu trúc cũ thiếu hoàn toàn các trường `deposit_amount` (Tiền cọc), `penalty_fee` (Phí phạt) và `cancel_reason` (Lý do hủy).
+3. **Thiếu sót thực thể Đơn thuốc (Prescription):** Schema cũ không có bảng `Prescriptions` và liên kết khóa ngoại với `Appointments`, khiến dữ liệu khám bệnh bị đứt gãy.
+git add .
+git commit -m "Add full healthsync files: sql script, ai prompt log, gap analysis report"
+git push origin main
